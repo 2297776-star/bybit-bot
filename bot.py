@@ -10,8 +10,21 @@ import schedule
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
-active_chats = set()
+CHAT_FILE = "chats.txt"
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "NEARUSDT", "ADAUSDT"]
+last_sent_signals = {}
+
+def load_chats():
+    if os.path.exists(CHAT_FILE):
+        with open(CHAT_FILE, "r") as f:
+            return set(line.strip() for line in f if line.strip())
+    return set()
+
+def save_chat(chat_id):
+    chats = load_chats()
+    if str(chat_id) not in chats:
+        with open(CHAT_FILE, "a") as f:
+            f.write(f"{chat_id}\n")
 
 def fetch_kline_data(symbol, interval="1", limit=300):
     mexc_interval = "1m" if interval == "1" else "5m"
@@ -30,13 +43,11 @@ def fetch_kline_data(symbol, interval="1", limit=300):
 def analyze_ict_indigo(symbol):
     df = fetch_kline_data(symbol, interval="1", limit=300)
     if df is None or len(df) < 50:
-        print(f"[{symbol}] Data not enough.")
         return None
 
     df['body_high'] = df[['open', 'close']].max(axis=1)
     df['body_low'] = df[['open', 'close']].min(axis=1)
 
-    # 1. پیاده‌سازی دقیق ta.pivotlow و ta.pivothigh مطابق با Pine Script (Swing Length = 3)
     swing_length = 3
     n = len(df)
     ssl_list = [np.nan] * n
@@ -66,11 +77,9 @@ def analyze_ict_indigo(symbol):
     df['ssl'] = ssl_list
     df['bsl'] = bsl_list
 
-    # 2. شکار نقدینگی (Stop Run)
     df['sellSideRun'] = df['low'] < df['ssl'].shift(1)
     df['buySideRun'] = df['high'] > df['bsl'].shift(1)
 
-    # 3. گپ حجمی (Volume Imbalance) - ترکیب حالت Positive و Raw برای محدودیت کمتر
     df['bullPositiveVI'] = df['body_high'] < df['body_low'].shift(1)
     df['bearPositiveVI'] = df['body_low'] > df['body_high'].shift(1)
     
@@ -80,52 +89,57 @@ def analyze_ict_indigo(symbol):
     df['bullVI'] = df['bullPositiveVI'] | df['bullRawVI']
     df['bearVI'] = df['bearPositiveVI'] | df['bearRawVI']
 
-    # 4. کاندید ستاپ (Candidate)
     df['bullCandidate'] = df['sellSideRun'] & (df['close'] < df['open']) & df['bullVI']
     df['bearCandidate'] = df['buySideRun'] & (df['close'] > df['open']) & df['bearVI']
 
-    # 5. تاییدیه ستاپ (Confirmation)
     df['bullConfirmed'] = df['bullCandidate'].shift(1) & (df['close'] > df['high'].shift(1))
     df['bearConfirmed'] = df['bearCandidate'].shift(1) & (df['close'] < df['low'].shift(1))
 
-    last_closed = df.iloc[-2]
+    # بررسی آخرین کندل برای انطباق هم‌زمان با تریدینگ‌ویو
+    current_candle = df.iloc[-1]
+    candle_time = current_candle['timestamp']
 
-    # لاگ دقیق جهت بررسی گام به گام
-    print(f"[{symbol} 1m] Price: {last_closed['close']} | SSL: {last_closed['ssl']} | BSL: {last_closed['bsl']} | Candidate: {last_closed['bullCandidate'] or last_closed['bearCandidate']} | Confirmed: {last_closed['bullConfirmed'] or last_closed['bearConfirmed']}")
+    print(f"[{symbol} 1m] Price: {current_candle['close']} | BullConf: {current_candle['bullConfirmed']} | BearConf: {current_candle['bearConfirmed']}")
 
-    if last_closed['bullConfirmed']:
-        return f"🟢 **سیگنال خرید (LONG)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nاستراتژی: ICT Indigo\nقیمت ورود: {last_closed['close']}"
-    elif last_closed['bearConfirmed']:
-        return f"🔴 **سیگنال فروش (SHORT)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nاستراتژی: ICT Indigo\nقیمت ورود: {last_closed['close']}"
+    if current_candle['bullConfirmed']:
+        if last_sent_signals.get(f"{symbol}_LONG") != candle_time:
+            last_sent_signals[f"{symbol}_LONG"] = candle_time
+            return f"🟢 **سیگنال خرید (LONG)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nقیمت ورود: {current_candle['close']}"
+
+    elif current_candle['bearConfirmed']:
+        if last_sent_signals.get(f"{symbol}_SHORT") != candle_time:
+            last_sent_signals[f"{symbol}_SHORT"] = candle_time
+            return f"🔴 **سیگنال فروش (SHORT)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nقیمت ورود: {current_candle['close']}"
 
     return None
 
 def check_all_markets():
+    active_chats = load_chats()
     if not active_chats:
-        print("No active chats registered yet.")
+        print("No active chats registered. Send /start to the bot.")
         return
+
     for symbol in SYMBOLS:
         signal = analyze_ict_indigo(symbol)
         if signal:
-            for chat in active_chats:
+            for chat_id in active_chats:
                 try:
-                    bot.send_message(chat, signal, parse_mode="Markdown")
+                    bot.send_message(chat_id, signal, parse_mode="Markdown")
                 except Exception as e:
-                    print(f"Error sending message: {e}")
+                    print(f"Error sending to {chat_id}: {e}")
 
 def run_scheduler():
-    schedule.every(1).minute.do(check_all_markets)
+    schedule.every(10).seconds.do(check_all_markets)
     while True:
         schedule.run_pending()
         time.sleep(1)
 
 @bot.message_handler(commands=['start'])
 def start_bot(message):
-    chat_id = message.chat.id
-    active_chats.add(chat_id)
-    bot.reply_to(message, "✅ ربات تحلیل‌گر ICT Indigo (مستقیم با مکسی و الگوریتم دقیق) فعال شد.")
+    save_chat(message.chat.id)
+    bot.reply_to(message, "✅ ثبت‌نام شما انجام شد. سیگنال‌های ICT Indigo دریافت خواهند شد.")
 
 if __name__ == "__main__":
-    print("Bot is starting with precise ICT Indigo logic...")
+    print("Bot is running with synchronized alert system...")
     threading.Thread(target=run_scheduler, daemon=True).start()
     bot.infinity_polling()
