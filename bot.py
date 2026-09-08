@@ -4,6 +4,7 @@ import threading
 import telebot
 import requests
 import pandas as pd
+import numpy as np
 import schedule
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -12,7 +13,7 @@ bot = telebot.TeleBot(TOKEN)
 active_chats = set()
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "NEARUSDT", "ADAUSDT"]
 
-def fetch_kline_data(symbol, interval="1", limit=100):
+def fetch_kline_data(symbol, interval="1", limit=300):
     mexc_interval = "1m" if interval == "1" else "5m"
     url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval={mexc_interval}&limit={limit}"
     try:
@@ -27,7 +28,7 @@ def fetch_kline_data(symbol, interval="1", limit=100):
     return None
 
 def analyze_ict_indigo(symbol):
-    df = fetch_kline_data(symbol)
+    df = fetch_kline_data(symbol, interval="1", limit=300)
     if df is None or len(df) < 50:
         print(f"[{symbol}] Data not enough.")
         return None
@@ -35,35 +36,68 @@ def analyze_ict_indigo(symbol):
     df['body_high'] = df[['open', 'close']].max(axis=1)
     df['body_low'] = df[['open', 'close']].min(axis=1)
 
-    df['pivot_low'] = df['low'].rolling(window=7, center=True).min()
-    df['is_pivot_low'] = df['low'] == df['pivot_low']
-    df['ssl'] = df['low'].where(df['is_pivot_low']).ffill()
+    # 1. پیاده‌سازی دقیق ta.pivotlow و ta.pivothigh مطابق با Pine Script (Swing Length = 3)
+    swing_length = 3
+    n = len(df)
+    ssl_list = [np.nan] * n
+    bsl_list = [np.nan] * n
+    curr_sl = np.nan
+    curr_sh = np.nan
 
-    df['pivot_high'] = df['high'].rolling(window=7, center=True).max()
-    df['is_pivot_high'] = df['high'] == df['pivot_high']
-    df['bsl'] = df['high'].where(df['is_pivot_high']).ffill()
+    for i in range(2 * swing_length, n):
+        p_idx = i - swing_length
+        p_low = df['low'].iloc[p_idx]
+        p_high = df['high'].iloc[p_idx]
 
-    df['bullStopRun'] = df['low'] < df['ssl'].shift(1)
-    df['bearStopRun'] = df['high'] > df['bsl'].shift(1)
+        left_lows = df['low'].iloc[p_idx - swing_length : p_idx]
+        right_lows = df['low'].iloc[p_idx + 1 : i + 1]
 
-    df['bullPositiveVI'] = (df['body_high'] < df['body_low'].shift(1)) & (df['close'] < df['open'])
-    df['bearPositiveVI'] = (df['body_low'] > df['body_high'].shift(1)) & (df['close'] > df['open'])
+        left_highs = df['high'].iloc[p_idx - swing_length : p_idx]
+        right_highs = df['high'].iloc[p_idx + 1 : i + 1]
 
-    df['bullCandidate'] = df['bullStopRun'] & df['bullPositiveVI']
-    df['bearCandidate'] = df['bearStopRun'] & df['bearPositiveVI']
+        if (p_low < left_lows).all() and (p_low < right_lows).all():
+            curr_sl = p_low
+        if (p_high > left_highs).all() and (p_high > right_highs).all():
+            curr_sh = p_high
 
+        ssl_list[i] = curr_sl
+        bsl_list[i] = curr_sh
+
+    df['ssl'] = ssl_list
+    df['bsl'] = bsl_list
+
+    # 2. شکار نقدینگی (Stop Run)
+    df['sellSideRun'] = df['low'] < df['ssl'].shift(1)
+    df['buySideRun'] = df['high'] > df['bsl'].shift(1)
+
+    # 3. گپ حجمی (Volume Imbalance) - ترکیب حالت Positive و Raw برای محدودیت کمتر
+    df['bullPositiveVI'] = df['body_high'] < df['body_low'].shift(1)
+    df['bearPositiveVI'] = df['body_low'] > df['body_high'].shift(1)
+    
+    df['bullRawVI'] = df['close'].shift(1) > df['open']
+    df['bearRawVI'] = df['open'] > df['close'].shift(1)
+
+    df['bullVI'] = df['bullPositiveVI'] | df['bullRawVI']
+    df['bearVI'] = df['bearPositiveVI'] | df['bearRawVI']
+
+    # 4. کاندید ستاپ (Candidate)
+    df['bullCandidate'] = df['sellSideRun'] & (df['close'] < df['open']) & df['bullVI']
+    df['bearCandidate'] = df['buySideRun'] & (df['close'] > df['open']) & df['bearVI']
+
+    # 5. تاییدیه ستاپ (Confirmation)
     df['bullConfirmed'] = df['bullCandidate'].shift(1) & (df['close'] > df['high'].shift(1))
     df['bearConfirmed'] = df['bearCandidate'].shift(1) & (df['close'] < df['low'].shift(1))
 
     last_closed = df.iloc[-2]
-    
-    print(f"Check {symbol} (MEXC 1m) -> Price: {last_closed['close']} | BullConf: {last_closed['bullConfirmed']} | BearConf: {last_closed['bearConfirmed']}")
+
+    # لاگ دقیق جهت بررسی گام به گام
+    print(f"[{symbol} 1m] Price: {last_closed['close']} | SSL: {last_closed['ssl']} | BSL: {last_closed['bsl']} | Candidate: {last_closed['bullCandidate'] or last_closed['bearCandidate']} | Confirmed: {last_closed['bullConfirmed'] or last_closed['bearConfirmed']}")
 
     if last_closed['bullConfirmed']:
-        return f"🟢 **سیگنال خرید (LONG)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nاستراتژی: ICT Indigo Entry\nقیمت ورود: {last_closed['close']}"
+        return f"🟢 **سیگنال خرید (LONG)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nاستراتژی: ICT Indigo\nقیمت ورود: {last_closed['close']}"
     elif last_closed['bearConfirmed']:
-        return f"🔴 **سیگنال فروش (SHORT)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nاستراتژی: ICT Indigo Entry\nقیمت ورود: {last_closed['close']}"
-    
+        return f"🔴 **سیگنال فروش (SHORT)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nاستراتژی: ICT Indigo\nقیمت ورود: {last_closed['close']}"
+
     return None
 
 def check_all_markets():
@@ -89,9 +123,9 @@ def run_scheduler():
 def start_bot(message):
     chat_id = message.chat.id
     active_chats.add(chat_id)
-    bot.reply_to(message, "✅ ربات تحلیل‌گر ICT (روی صرافی MEXC و تایم‌فریم ۱ دقیقه بدون فیلتر زمانی) فعال شد.")
+    bot.reply_to(message, "✅ ربات تحلیل‌گر ICT Indigo (مستقیم با مکسی و الگوریتم دقیق) فعال شد.")
 
 if __name__ == "__main__":
-    print("Bot is starting with MEXC API (1m)...")
+    print("Bot is starting with precise ICT Indigo logic...")
     threading.Thread(target=run_scheduler, daemon=True).start()
     bot.infinity_polling()
