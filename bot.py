@@ -39,7 +39,8 @@ def fetch_kline_data(symbol, interval="1", limit=300):
     except Exception as e:
         print(f"Error fetching data from MEXC for {symbol}: {e}")
     return None
-    def analyze_ict_indigo(symbol):
+
+def analyze_ict_indigo(symbol):
     df = fetch_kline_data(symbol, interval="1", limit=300)
     if df is None or len(df) < 50:
         return None
@@ -114,6 +115,15 @@ def fetch_kline_data(symbol, interval="1", limit=300):
         if candle['bearConfirmed']:
             if last_sent_signals.get(f"{symbol}_SHORT") != candle_time:
                 last_sent_signals[f"{symbol}_SHORT"] = candle_time
+                print(f"[{symbol} 1m] SHORT confirmed at price {candle['close']}")
+                return (f"🔴 **سیگنال فروش (SHORT)**\n"
+                        f"نماد: {symbol}\n"
+                        f"صرافی: MEXC\n"
+                        f"تایم‌فریم: ۱ دقیقه\n"
+                        f"قیمت ورود: {candle['close']}")
+
+    return None
+
 def check_all_markets():
     active_chats = load_chats()
     if not active_chats:
@@ -144,16 +154,3 @@ if __name__ == "__main__":
     print("Bot is running with synchronized alert system...")
     threading.Thread(target=run_scheduler, daemon=True).start()
     bot.infinity_polling()
-
-
-
-                
-                print(f"[{symbol} 1m] SHORT confirmed at price {candle['close']}")
-                return (f"🔴 **سیگنال فروش (SHORT)**\n"
-                        f"نماد: {symbol}\n"
-                        f"صرافی: MEXC\n"
-                        f"تایم‌فریم: ۱ دقیقه\n"
-                        f"قیمت ورود: {candle['close']}")
-                
-
-    return None
