@@ -36,11 +36,11 @@ def analyze_ict_indigo(symbol):
 
     df['pivot_low'] = df['low'].rolling(window=7, center=True).min()
     df['is_pivot_low'] = df['low'] == df['pivot_low']
-    df['ssl'] = df['low'].where(df['is_pivot_low']].ffill()
+    df['ssl'] = df['low'].where(df['is_pivot_low']).ffill()
 
     df['pivot_high'] = df['high'].rolling(window=7, center=True).max()
     df['is_pivot_high'] = df['high'] == df['pivot_high']
-    df['bsl'] = df['high'].where(df['is_pivot_high']].ffill()
+    df['bsl'] = df['high'].where(df['is_pivot_high']).ffill()
 
     df['bullStopRun'] = df['low'] < df['ssl'].shift(1)
     df['bearStopRun'] = df['high'] > df['bsl'].shift(1)
@@ -56,7 +56,6 @@ def analyze_ict_indigo(symbol):
 
     last_closed = df.iloc[-2]
     
-    # چاپ وضعیت در کنسول رایلی برای بررسی
     print(f"Check {symbol} -> Price: {last_closed['close']} | BullConf: {last_closed['bullConfirmed']} | BearConf: {last_closed['bearConfirmed']}")
 
     if last_closed['bullConfirmed']:
