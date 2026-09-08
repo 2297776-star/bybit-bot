@@ -1,3 +1,4 @@
+import schedule
 import os
 import time
 import threading
@@ -5,7 +6,6 @@ import telebot
 import requests
 import pandas as pd
 import numpy as np
-import schedule
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 bot = telebot.TeleBot(TOKEN)
@@ -39,8 +39,7 @@ def fetch_kline_data(symbol, interval="1", limit=300):
     except Exception as e:
         print(f"Error fetching data from MEXC for {symbol}: {e}")
     return None
-
-def analyze_ict_indigo(symbol):
+    def analyze_ict_indigo(symbol):
     df = fetch_kline_data(symbol, interval="1", limit=300)
     if df is None or len(df) < 50:
         return None
@@ -80,9 +79,10 @@ def analyze_ict_indigo(symbol):
     df['sellSideRun'] = df['low'] < df['ssl'].shift(1)
     df['buySideRun'] = df['high'] > df['bsl'].shift(1)
 
-    df['bullPositiveVI'] = df['body_high'] < df['body_low'].shift(1)
-    df['bearPositiveVI'] = df['body_low'] > df['body_high'].shift(1)
-    
+    # درست شدن Positive VI — مقایسه بدنه‌ها
+    df['bullPositiveVI'] = df['body_low'] > df['body_high'].shift(1)
+    df['bearPositiveVI'] = df['body_high'] < df['body_low'].shift(1)
+
     df['bullRawVI'] = df['close'].shift(1) > df['open']
     df['bearRawVI'] = df['open'] > df['close'].shift(1)
 
@@ -95,24 +95,25 @@ def analyze_ict_indigo(symbol):
     df['bullConfirmed'] = df['bullCandidate'].shift(1) & (df['close'] > df['high'].shift(1))
     df['bearConfirmed'] = df['bearCandidate'].shift(1) & (df['close'] < df['low'].shift(1))
 
-    # بررسی آخرین کندل برای انطباق هم‌زمان با تریدینگ‌ویو
-    current_candle = df.iloc[-1]
-    candle_time = current_candle['timestamp']
+    # بررسی سه کندل آخر برای از دست نرفتن سیگنال تأییدشده
+    for offset in [0, 1, 2]:
+        idx = len(df) - 1 - offset
+        candle = df.iloc[idx]
+        candle_time = candle['timestamp']
 
-    print(f"[{symbol} 1m] Price: {current_candle['close']} | BullConf: {current_candle['bullConfirmed']} | BearConf: {current_candle['bearConfirmed']}")
+        if candle['bullConfirmed']:
+            if last_sent_signals.get(f"{symbol}_LONG") != candle_time:
+                last_sent_signals[f"{symbol}_LONG"] = candle_time
+                print(f"[{symbol} 1m] LONG confirmed at price {candle['close']}")
+                return (f"🟢 **سیگنال خرید (LONG)**\n"
+                        f"نماد: {symbol}\n"
+                        f"صرافی: MEXC\n"
+                        f"تایم‌فریم: ۱ دقیقه\n"
+                        f"قیمت ورود: {candle['close']}")
 
-    if current_candle['bullConfirmed']:
-        if last_sent_signals.get(f"{symbol}_LONG") != candle_time:
-            last_sent_signals[f"{symbol}_LONG"] = candle_time
-            return f"🟢 **سیگنال خرید (LONG)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nقیمت ورود: {current_candle['close']}"
-
-    elif current_candle['bearConfirmed']:
-        if last_sent_signals.get(f"{symbol}_SHORT") != candle_time:
-            last_sent_signals[f"{symbol}_SHORT"] = candle_time
-            return f"🔴 **سیگنال فروش (SHORT)**\nنماد: {symbol}\nصرافی: MEXC\nتایم‌فریم: ۱ دقیقه\nقیمت ورود: {current_candle['close']}"
-
-    return None
-
+        if candle['bearConfirmed']:
+            if last_sent_signals.get(f"{symbol}_SHORT") != candle_time:
+                last_sent_signals[f"{symbol}_SHORT"] = candle_time
 def check_all_markets():
     active_chats = load_chats()
     if not active_chats:
@@ -143,3 +144,16 @@ if __name__ == "__main__":
     print("Bot is running with synchronized alert system...")
     threading.Thread(target=run_scheduler, daemon=True).start()
     bot.infinity_polling()
+
+
+
+                
+                print(f"[{symbol} 1m] SHORT confirmed at price {candle['close']}")
+                return (f"🔴 **سیگنال فروش (SHORT)**\n"
+                        f"نماد: {symbol}\n"
+                        f"صرافی: MEXC\n"
+                        f"تایم‌فریم: ۱ دقیقه\n"
+                        f"قیمت ورود: {candle['close']}")
+                
+
+    return None
