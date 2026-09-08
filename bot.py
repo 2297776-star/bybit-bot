@@ -9,10 +9,7 @@ import schedule
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
-# لیستی از چت‌آیدی‌هایی که ربات باید برایشان سیگنال بفرستد
 active_chats = set()
-
-# نمادهای درخواستی (بخش فیوچرز/لاینر بای‌بیت)
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "NEARUSDT", "ADAUSDT"]
 
 def fetch_kline_data(symbol, interval="5", limit=100):
@@ -21,7 +18,7 @@ def fetch_kline_data(symbol, interval="5", limit=100):
         response = requests.get(url).json()
         if response['retCode'] == 0:
             df = pd.DataFrame(response['result']['list'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-            df = df.iloc[::-1].reset_index(drop=True) # مرتب‌سازی زمانی
+            df = df.iloc[::-1].reset_index(drop=True)
             df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].astype(float)
             return df
     except Exception as e:
@@ -31,40 +28,37 @@ def fetch_kline_data(symbol, interval="5", limit=100):
 def analyze_ict_indigo(symbol):
     df = fetch_kline_data(symbol)
     if df is None or len(df) < 50:
+        print(f"[{symbol}] Data not enough.")
         return None
 
-    # 1. تنظیمات کندل‌ها
     df['body_high'] = df[['open', 'close']].max(axis=1)
     df['body_low'] = df[['open', 'close']].min(axis=1)
 
-    # 2. تشخیص نقدینگی (Swing Low / High) با طول 3
     df['pivot_low'] = df['low'].rolling(window=7, center=True).min()
     df['is_pivot_low'] = df['low'] == df['pivot_low']
-    df['ssl'] = df['low'].where(df['is_pivot_low']).ffill()
+    df['ssl'] = df['low'].where(df['is_pivot_low']].ffill()
 
     df['pivot_high'] = df['high'].rolling(window=7, center=True).max()
     df['is_pivot_high'] = df['high'] == df['pivot_high']
-    df['bsl'] = df['high'].where(df['is_pivot_high']).ffill()
+    df['bsl'] = df['high'].where(df['is_pivot_high']].ffill()
 
-    # 3. شکار نقدینگی (Stop Run)
     df['bullStopRun'] = df['low'] < df['ssl'].shift(1)
     df['bearStopRun'] = df['high'] > df['bsl'].shift(1)
 
-    # 4. گپ حجمی (Volume Imbalance)
     df['bullPositiveVI'] = (df['body_high'] < df['body_low'].shift(1)) & (df['close'] < df['open'])
     df['bearPositiveVI'] = (df['body_low'] > df['body_high'].shift(1)) & (df['close'] > df['open'])
 
-    # 5. کاندید شدن برای ستاپ
     df['bullCandidate'] = df['bullStopRun'] & df['bullPositiveVI']
     df['bearCandidate'] = df['bearStopRun'] & df['bearPositiveVI']
 
-    # 6. تاییدیه ستاپ (Confirmation) در کندل بعدی
     df['bullConfirmed'] = df['bullCandidate'].shift(1) & (df['close'] > df['high'].shift(1))
     df['bearConfirmed'] = df['bearCandidate'].shift(1) & (df['close'] < df['low'].shift(1))
 
-    # بررسی کندل تازه بسته شده (ایندکس یکی مانده به آخر)
     last_closed = df.iloc[-2]
     
+    # چاپ وضعیت در کنسول رایلی برای بررسی
+    print(f"Check {symbol} -> Price: {last_closed['close']} | BullConf: {last_closed['bullConfirmed']} | BearConf: {last_closed['bearConfirmed']}")
+
     if last_closed['bullConfirmed']:
         return f"🟢 **سیگنال خرید (LONG)**\nنماد: {symbol}\nاستراتژی: ICT Indigo Entry\nقیمت ورود: {last_closed['close']}"
     elif last_closed['bearConfirmed']:
@@ -74,6 +68,7 @@ def analyze_ict_indigo(symbol):
 
 def check_all_markets():
     if not active_chats:
+        print("No active chats registered yet.")
         return
     for symbol in SYMBOLS:
         signal = analyze_ict_indigo(symbol)
@@ -81,10 +76,9 @@ def check_all_markets():
             for chat in active_chats:
                 try:
                     bot.send_message(chat, signal, parse_mode="Markdown")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error sending message: {e}")
 
-# زمان‌بندی برای اجرای تابع هر 5 دقیقه
 def run_scheduler():
     schedule.every(5).minutes.do(check_all_markets)
     while True:
@@ -95,7 +89,7 @@ def run_scheduler():
 def start_bot(message):
     chat_id = message.chat.id
     active_chats.add(chat_id)
-    bot.reply_to(message, "✅ ربات تحلیل‌گر ICT فعال شد. از این پس سیگنال‌های تایم‌فریم ۵ دقیقه برای شما ارسال می‌شود.")
+    bot.reply_to(message, "✅ ربات تحلیل‌گر ICT فعال شد و وضعیت بازار رصد می‌شود.")
 
 if __name__ == "__main__":
     print("Bot is starting and analyzer thread is running...")
